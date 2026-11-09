@@ -1,0 +1,62 @@
+# helm upgrade --install kps prometheus-community/kube-prometheus-stack -n monitoring -f values-kube-prometheus-stack.yaml
+# Managed LKE hides the control plane, so don't try to scrape it.
+kubeEtcd:              { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler:         { enabled: false }
+kubeProxy:             { enabled: false }
+
+prometheus:
+  prometheusSpec:
+    retention: 35d                      # SLO panels look back 30 days
+    # pick up ServiceMonitors / PrometheusRules from every namespace, no label games
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: linode-block-storage-retain
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 20Gi } }
+
+alertmanager:
+  config:
+    route:
+      receiver: "null"
+      group_by: [alertname, chain]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - matchers: [ 'alertname="Watchdog"' ]
+          receiver: "null"
+    receivers:
+      - name: "null"
+      # Add Telegram/Slack here; see deploy/compose/alertmanager.yml for an example.
+    inhibit_rules:
+      - source_matchers: [ 'scope="chain"' ]
+        target_matchers: [ 'scope=~"provider|slo"' ]
+        equal: [chain]
+
+grafana:
+  adminPassword: change-me              # or use admin.existingSecret
+  defaultDashboardsEnabled: true
+  grafana.ini:
+    auth.anonymous:
+      enabled: true                     # public read-only dashboard link for your résumé
+      org_role: Viewer
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      url: http://loki.monitoring.svc:3100
+  # Uncomment for a public IP (creates a Linode NodeBalancer, ~$10/month).
+  # Otherwise: kubectl -n monitoring port-forward svc/kps-grafana 3000:80
+  # service:
+  #   type: LoadBalancer

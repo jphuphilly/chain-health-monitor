@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chain-health-exporter
+  namespace: chainmon
+  labels: { app: chain-health-exporter }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: chain-health-exporter }
+  template:
+    metadata:
+      labels: { app: chain-health-exporter }
+      annotations:
+        # bumped by scripts/k8s-deploy.sh so a config change restarts the pod
+        chainmon/config-hash: "CONFIG_HASH"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: exporter
+          image: IMAGE
+          imagePullPolicy: Always
+          env:
+            - { name: CONFIG_PATH, value: /config/config.yaml }
+          ports:
+            - { name: metrics, containerPort: 9105 }
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: chainmon-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chain-health-exporter
+  namespace: chainmon
+  labels: { app: chain-health-exporter }
+spec:
+  selector: { app: chain-health-exporter }
+  ports:
+    - { name: metrics, port: 9105, targetPort: metrics }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chain-health-exporter
+  namespace: chainmon
+spec:
+  selector:
+    matchLabels: { app: chain-health-exporter }
+  endpoints:
+    - { port: metrics, interval: 15s }

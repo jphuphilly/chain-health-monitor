@@ -1,0 +1,73 @@
+# Run with:  promtool test rules prometheus/rules_test.yml
+# Proves the alerts can tell "one provider is broken" from "the chain stopped".
+rule_files: [rules.yml]
+evaluation_interval: 30s
+
+tests:
+  # 1. bravo is 60 blocks (120s) behind, chain is healthy
+  - interval: 30s
+    input_series:
+      - { series: 'chainmon_head_timestamp_seconds{chain="demo",provider="alpha"}', values: '0+30x40' }
+      - { series: 'chainmon_head_timestamp_seconds{chain="demo",provider="bravo"}', values: '-120+30x40' }
+      - { series: 'chainmon_head_block{chain="demo",provider="alpha"}', values: '1000+15x40' }
+      - { series: 'chainmon_head_block{chain="demo",provider="bravo"}', values: '940+15x40' }
+      - { series: 'chainmon_probe_success{chain="demo",provider="alpha"}', values: '1x40' }
+      - { series: 'chainmon_probe_success{chain="demo",provider="bravo"}', values: '1x40' }
+      - { series: 'chainmon_expected_block_time_seconds{chain="demo"}', values: '2x40' }
+      - { series: 'chainmon_lag_alert_seconds{chain="demo"}', values: '30x40' }
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProviderBehind
+        exp_alerts:
+          - exp_labels: { severity: warning, scope: provider, chain: demo, provider: bravo }
+            exp_annotations:
+              summary: "demo/bravo is 2m 0s behind the best provider"
+              description: "Chain is advancing elsewhere; this provider is lagging. See docs/RUNBOOK.md#providerbehind"
+      - { eval_time: 10m, alertname: ChainHeadStale, exp_alerts: [] }
+      - { eval_time: 10m, alertname: ChainHeightNotAdvancing, exp_alerts: [] }
+
+  # 2. the whole chain halts: every provider agrees, no new blocks
+  - interval: 30s
+    input_series:
+      - { series: 'chainmon_head_timestamp_seconds{chain="demo",provider="alpha"}', values: '0x40' }
+      - { series: 'chainmon_head_timestamp_seconds{chain="demo",provider="bravo"}', values: '0x40' }
+      - { series: 'chainmon_head_block{chain="demo",provider="alpha"}', values: '1000x40' }
+      - { series: 'chainmon_head_block{chain="demo",provider="bravo"}', values: '1000x40' }
+      - { series: 'chainmon_probe_success{chain="demo",provider="alpha"}', values: '1x40' }
+      - { series: 'chainmon_probe_success{chain="demo",provider="bravo"}', values: '1x40' }
+      - { series: 'chainmon_expected_block_time_seconds{chain="demo"}', values: '2x40' }
+      - { series: 'chainmon_lag_alert_seconds{chain="demo"}', values: '30x40' }
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ChainHeightNotAdvancing
+        exp_alerts:
+          - exp_labels: { severity: critical, scope: chain, chain: demo }
+            exp_annotations:
+              summary: "demo: block height has not increased in 3m on any provider"
+              description: "Height-based check; works even when block timestamps are unavailable (e.g. Solana). See docs/RUNBOOK.md#chainheadstale"
+      - eval_time: 6m
+        alertname: ChainHeadStale
+        exp_alerts:
+          - exp_labels: { severity: critical, scope: chain, chain: demo }
+            exp_annotations:
+              summary: "demo: no new block for 6m 0s on ANY provider"
+              description: "Every provider's newest block is stale. Likely a chain halt, not a provider issue. See docs/RUNBOOK.md#chainheadstale"
+      - { eval_time: 6m, alertname: ProviderBehind, exp_alerts: [] }
+    promql_expr_test:
+      - expr: chainmon:chain_fresh
+        eval_time: 6m
+        exp_samples: [ { labels: 'chainmon:chain_fresh{chain="demo"}', value: 0 } ]
+
+  # 3. every provider failing: we are blind, say so
+  - interval: 30s
+    input_series:
+      - { series: 'chainmon_probe_success{chain="demo",provider="alpha"}', values: '0x20' }
+      - { series: 'chainmon_probe_success{chain="demo",provider="bravo"}', values: '0x20' }
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ChainNoHealthyProviders
+        exp_alerts:
+          - exp_labels: { severity: critical, scope: chain, chain: demo }
+            exp_annotations:
+              summary: "demo: every provider is failing - we are blind"
+              description: "Either all providers are down or our egress/DNS is broken. Check another chain first: if all chains show this, the problem is us. See docs/RUNBOOK.md#chainnohealthyproviders"

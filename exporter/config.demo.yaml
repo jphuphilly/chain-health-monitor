@@ -1,0 +1,13 @@
+# Used with scripts/mock_rpc.py: a fake chain you can break on demand.
+interval_seconds: 5
+timeout_seconds: 2
+port: 9105
+
+chains:
+  demo:
+    type: evm
+    block_time_seconds: 2
+    lag_alert_seconds: 30
+    providers:
+      - { name: alpha, url: "http://localhost:8545/alpha" }
+      - { name: bravo, url: "http://localhost:8545/bravo" }

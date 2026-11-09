@@ -1,0 +1,138 @@
+groups:
+  # ---------------------------------------------------------------
+  # Recording rules: turn raw probe data into the signals we care about
+  # ---------------------------------------------------------------
+  - name: chainmon-recording
+    interval: 30s
+    rules:
+      # Seconds since the newest block each provider has seen
+      - record: chainmon:head_age_seconds
+        expr: time() - chainmon_head_timestamp_seconds
+
+      # Chain-level freshness = the BEST provider's view.
+      # If even the best provider is stale, the chain (not a provider) is in trouble.
+      - record: chainmon:chain_head_age_seconds
+        expr: min by (chain) (chainmon:head_age_seconds)
+
+      - record: chainmon:chain_head_block
+        expr: max by (chain) (chainmon_head_block)
+
+      # How many blocks each provider is behind the best provider
+      - record: chainmon:provider_lag_blocks
+        expr: max by (chain) (chainmon_head_block) - on (chain) group_right chainmon_head_block
+
+      - record: chainmon:provider_lag_seconds
+        expr: chainmon:provider_lag_blocks * on (chain) group_left max by (chain) (chainmon_expected_block_time_seconds)
+
+      # Freshness threshold per chain: 10 normal block times, never under 60s
+      - record: chainmon:freshness_threshold_seconds
+        expr: clamp_min(max by (chain) (chainmon_expected_block_time_seconds) * 10, 60)
+
+      # SLI #1 (chain freshness): 1 when the chain looks live, 0 when stale
+      - record: chainmon:chain_fresh
+        expr: chainmon:chain_head_age_seconds < bool on (chain) chainmon:freshness_threshold_seconds
+
+      # SLI #2 (provider availability): fraction of probes that failed.
+      # The "or ... * 0" keeps the series at 0 when there are no errors yet.
+      - record: chainmon:probe_error_ratio:rate5m
+        expr: |
+          (sum by (chain, provider) (rate(chainmon_probes_total{result!="success"}[5m]))
+            or sum by (chain, provider) (rate(chainmon_probes_total[5m])) * 0)
+          / sum by (chain, provider) (rate(chainmon_probes_total[5m]))
+      - record: chainmon:probe_error_ratio:rate30m
+        expr: |
+          (sum by (chain, provider) (rate(chainmon_probes_total{result!="success"}[30m]))
+            or sum by (chain, provider) (rate(chainmon_probes_total[30m])) * 0)
+          / sum by (chain, provider) (rate(chainmon_probes_total[30m]))
+      - record: chainmon:probe_error_ratio:rate1h
+        expr: |
+          (sum by (chain, provider) (rate(chainmon_probes_total{result!="success"}[1h]))
+            or sum by (chain, provider) (rate(chainmon_probes_total[1h])) * 0)
+          / sum by (chain, provider) (rate(chainmon_probes_total[1h]))
+      - record: chainmon:probe_error_ratio:rate6h
+        expr: |
+          (sum by (chain, provider) (rate(chainmon_probes_total{result!="success"}[6h]))
+            or sum by (chain, provider) (rate(chainmon_probes_total[6h])) * 0)
+          / sum by (chain, provider) (rate(chainmon_probes_total[6h]))
+
+      - record: chainmon:rpc_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (chain, provider, le) (rate(chainmon_rpc_duration_seconds_bucket[5m])))
+
+  # ---------------------------------------------------------------
+  # Alerts
+  # SLOs:
+  #   Chain freshness       99.9% of the time the chain head is fresh (30d)
+  #   Provider availability 99%   of probes succeed, per provider (30d) -> 1% error budget
+  # ---------------------------------------------------------------
+  - name: chainmon-alerts
+    rules:
+      # --- Chain-level: all providers agree the chain is stuck ---
+      - alert: ChainHeadStale
+        expr: chainmon:chain_head_age_seconds > on (chain) chainmon:freshness_threshold_seconds
+        for: 2m
+        labels: { severity: critical, scope: chain }
+        annotations:
+          summary: "{{ $labels.chain }}: no new block for {{ $value | humanizeDuration }} on ANY provider"
+          description: "Every provider's newest block is stale. Likely a chain halt, not a provider issue. See docs/RUNBOOK.md#chainheadstale"
+
+      - alert: ChainHeightNotAdvancing
+        expr: delta(chainmon:chain_head_block[3m]) <= 0
+        for: 1m
+        labels: { severity: critical, scope: chain }
+        annotations:
+          summary: "{{ $labels.chain }}: block height has not increased in 3m on any provider"
+          description: "Height-based check; works even when block timestamps are unavailable (e.g. Solana). See docs/RUNBOOK.md#chainheadstale"
+
+      - alert: ChainNoHealthyProviders
+        expr: sum by (chain) (chainmon_probe_success) == 0
+        for: 2m
+        labels: { severity: critical, scope: chain }
+        annotations:
+          summary: "{{ $labels.chain }}: every provider is failing - we are blind"
+          description: "Either all providers are down or our egress/DNS is broken. Check another chain first: if all chains show this, the problem is us. See docs/RUNBOOK.md#chainnohealthyproviders"
+
+      # --- Provider-level: one source is wrong, the chain is fine ---
+      - alert: ProviderBehind
+        expr: chainmon:provider_lag_seconds > on (chain) group_left max by (chain) (chainmon_lag_alert_seconds)
+        for: 5m
+        labels: { severity: warning, scope: provider }
+        annotations:
+          summary: "{{ $labels.chain }}/{{ $labels.provider }} is {{ $value | humanizeDuration }} behind the best provider"
+          description: "Chain is advancing elsewhere; this provider is lagging. See docs/RUNBOOK.md#providerbehind"
+
+      - alert: ProviderDown
+        expr: chainmon_probe_success == 0
+        for: 3m
+        labels: { severity: warning, scope: provider }
+        annotations:
+          summary: "{{ $labels.chain }}/{{ $labels.provider }} probes failing for 3m"
+          description: "See Loki: {app=\"chain-health-exporter\"} | json | provider=\"{{ $labels.provider }}\""
+
+      - alert: ProviderSlow
+        expr: chainmon:rpc_latency_seconds:p95_5m > 2
+        for: 10m
+        labels: { severity: warning, scope: provider }
+        annotations:
+          summary: "{{ $labels.chain }}/{{ $labels.provider }} p95 latency {{ $value | humanizeDuration }}"
+
+      # --- SLO burn-rate alerts (Google SRE workbook, multiwindow) ---
+      # Fast burn: 14.4x budget -> 2% of a 30d budget gone in 1h. Page.
+      - alert: ProviderErrorBudgetFastBurn
+        expr: |
+          chainmon:probe_error_ratio:rate1h > (14.4 * 0.01)
+          and chainmon:probe_error_ratio:rate5m > (14.4 * 0.01)
+        for: 2m
+        labels: { severity: critical, scope: slo }
+        annotations:
+          summary: "{{ $labels.chain }}/{{ $labels.provider }} burning error budget 14x too fast"
+          description: "At this rate the 30-day 1% error budget is gone in ~2 days. See docs/RUNBOOK.md#errorbudget"
+
+      # Slow burn: 6x budget over 6h. Ticket, not a page.
+      - alert: ProviderErrorBudgetSlowBurn
+        expr: |
+          chainmon:probe_error_ratio:rate6h > (6 * 0.01)
+          and chainmon:probe_error_ratio:rate30m > (6 * 0.01)
+        for: 15m
+        labels: { severity: warning, scope: slo }
+        annotations:
+          summary: "{{ $labels.chain }}/{{ $labels.provider }} burning error budget 6x too fast"

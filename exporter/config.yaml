@@ -1,0 +1,54 @@
+# Chains and RPC providers to probe.
+# Two or more providers per chain is the point: it lets you tell
+# "one provider is broken" apart from "the chain itself stopped".
+# Public endpoints change; run scripts/check-endpoints.sh after editing.
+interval_seconds: 10
+timeout_seconds: 5
+port: 9105
+
+chains:
+  ethereum:
+    type: evm
+    block_time_seconds: 12
+    lag_alert_seconds: 60
+    providers:
+      - { name: publicnode, url: "https://ethereum-rpc.publicnode.com" }
+      - { name: drpc,       url: "https://eth.drpc.org" }
+  base:
+    type: evm
+    block_time_seconds: 2
+    lag_alert_seconds: 30
+    providers:
+      - { name: official,   url: "https://mainnet.base.org" }
+      - { name: publicnode, url: "https://base-rpc.publicnode.com" }
+  arbitrum:
+    type: evm
+    block_time_seconds: 0.25
+    lag_alert_seconds: 30
+    providers:
+      - { name: official,   url: "https://arb1.arbitrum.io/rpc" }
+      - { name: publicnode, url: "https://arbitrum-one-rpc.publicnode.com" }
+  polygon:
+    type: evm
+    block_time_seconds: 2
+    lag_alert_seconds: 30
+    providers:
+      - { name: publicnode, url: "https://polygon-bor-rpc.publicnode.com" }
+      - { name: drpc,       url: "https://polygon.drpc.org" }
+  solana:
+    type: solana
+    block_time_seconds: 0.4
+    lag_alert_seconds: 30
+    providers:
+      - { name: official,   url: "https://api.mainnet-beta.solana.com" }
+      - { name: publicnode, url: "https://solana-rpc.publicnode.com" }
+
+  # Fake chain served by scripts/mock_rpc.py (service "mock-rpc").
+  # Lets you break things on purpose during a demo. Delete this block if you don't want it.
+  demo:
+    type: evm
+    block_time_seconds: 2
+    lag_alert_seconds: 30
+    providers:
+      - { name: alpha, url: "http://mock-rpc:8545/alpha" }
+      - { name: bravo, url: "http://mock-rpc:8545/bravo" }

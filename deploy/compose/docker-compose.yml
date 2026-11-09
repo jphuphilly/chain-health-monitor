@@ -1,0 +1,78 @@
+# Local stack: exporter + fake chain + Prometheus + Alertmanager + Loki + Alloy + Grafana
+#   cd deploy/compose && docker compose up -d --build
+#   Grafana:      http://localhost:3000   (admin / see GF_SECURITY_ADMIN_PASSWORD; anonymous view enabled)
+#   Prometheus:   http://localhost:9090
+#   Alertmanager: http://localhost:9093
+name: chainmon
+
+services:
+  chain-health-exporter:
+    build: ../../exporter
+    environment:
+      CONFIG_PATH: /app/config.yaml
+    volumes:
+      - ../../exporter/config.yaml:/app/config.yaml:ro
+    ports: ["9105:9105"]
+    restart: unless-stopped
+
+  mock-rpc:
+    image: python:3.12-slim
+    command: ["python", "/app/mock_rpc.py"]
+    volumes:
+      - ../../scripts/mock_rpc.py:/app/mock_rpc.py:ro
+    ports: ["8545:8545"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=35d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["9093:9093"]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports: ["3100:3100"]
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.3.1
+    command: ["run", "/etc/alloy/config.alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/chain-health.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki]
+    restart: unless-stopped
+
+volumes:
+  prom-data:
+  grafana-data:

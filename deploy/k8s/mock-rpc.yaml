@@ -1,0 +1,49 @@
+# Fake chain for live demos. Break it with:
+#   kubectl -n chainmon port-forward svc/mock-rpc 8545:8545
+#   curl "localhost:8545/control?chain=halt"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-rpc
+  namespace: chainmon
+  labels: { app: mock-rpc }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-rpc }
+  template:
+    metadata:
+      labels: { app: mock-rpc }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mock-rpc
+          image: python:3.12-slim
+          command: ["python", "/app/mock_rpc.py"]
+          ports:
+            - { name: rpc, containerPort: 8545 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: script, mountPath: /app, readOnly: true }
+      volumes:
+        - name: script
+          configMap: { name: mock-rpc-script }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-rpc
+  namespace: chainmon
+spec:
+  selector: { app: mock-rpc }
+  ports:
+    - { name: rpc, port: 8545, targetPort: rpc }
