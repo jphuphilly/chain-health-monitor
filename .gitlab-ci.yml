@@ -1,0 +1,39 @@
+# GitLab CI mirror of .github/workflows/ci.yml
+# Stages run in order; a failed test stage stops the image build.
+stages: [test, build]
+
+variables:
+  PROM_VERSION: "2.53.2"
+
+test:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl git >/dev/null
+    - pip install -q -r exporter/requirements.txt
+  script:
+    - python -m py_compile exporter/app.py scripts/mock_rpc.py
+    # promtool: syntax check + alert unit tests (halt vs provider-behind vs blind)
+    - curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" | tar xz
+    - ./prometheus-${PROM_VERSION}.linux-amd64/promtool check rules prometheus/rules.yml
+    - ./prometheus-${PROM_VERSION}.linux-amd64/promtool test rules prometheus/rules_test.yml
+    # dashboard JSON must match its generator
+    - python scripts/build_dashboard.py && git diff --exit-code dashboards/
+    # end-to-end: fake chain + exporter, break a provider, check detection
+    - ./scripts/smoke-test.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+build-image:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE/chain-health-exporter:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE/chain-health-exporter:latest" exporter
+    - docker push --all-tags "$CI_REGISTRY_IMAGE/chain-health-exporter"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

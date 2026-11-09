@@ -1,0 +1,47 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r exporter/requirements.txt
+      - name: exporter compiles
+        run: python -m py_compile exporter/app.py scripts/mock_rpc.py
+      - name: promtool check + alert unit tests
+        run: |
+          curl -sSL https://github.com/prometheus/prometheus/releases/download/v2.53.2/prometheus-2.53.2.linux-amd64.tar.gz | tar xz
+          ./prometheus-2.53.2.linux-amd64/promtool check rules prometheus/rules.yml
+          ./prometheus-2.53.2.linux-amd64/promtool test rules prometheus/rules_test.yml
+      - name: dashboard JSON is up to date with its generator
+        run: python scripts/build_dashboard.py && git diff --exit-code dashboards/
+      - name: end-to-end smoke test against the mock chain
+        run: ./scripts/smoke-test.sh
+
+  image:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v4
+      - id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/chain-health-exporter" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: exporter
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}:latest
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
